@@ -1,0 +1,19 @@
+{
+  "metadata": {
+    "export_type": "predictions",
+    "export_timestamp": "2025-10-01T09:14:32.686718",
+    "exported_by_role": "researcher"
+  },
+  "data": [
+    {
+      "model_name": "QSVM",
+      "accuracy": 0.8571,
+      "processing_time": 0.891
+    },
+    {
+      "model_name": "SVM",
+      "accuracy": 0.6667,
+      "processing_time": 0.042
+    }
+  ]
+}

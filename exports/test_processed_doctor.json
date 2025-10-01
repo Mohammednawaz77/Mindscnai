@@ -1,0 +1,10 @@
+{
+  "metadata": {
+    "export_type": "processed_data",
+    "export_timestamp": "2025-10-01T09:15:55.425554",
+    "exported_by_role": "doctor"
+  },
+  "data": {
+    "test": "data"
+  }
+}

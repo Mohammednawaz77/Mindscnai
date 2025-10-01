@@ -1,0 +1,278 @@
+import streamlit as st
+import sys
+from pathlib import Path
+import numpy as np
+import tempfile
+import os
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from preprocessing.eeg_processor import EEGProcessor
+from preprocessing.channel_selector import ChannelSelector
+from models.quantum_ml import QuantumMLModels
+from models.classical_ml import ClassicalMLModels
+from analysis.brain_metrics import BrainMetricsAnalyzer
+from visualization.signal_plots import SignalVisualizer
+from utils.security import SecurityManager
+from utils.helpers import Helpers
+
+# Check authentication
+if 'authenticated' not in st.session_state or not st.session_state.authenticated:
+    st.warning("Please login first")
+    st.stop()
+
+st.title("📤 Upload & Analyze EEG Data")
+st.markdown("### Quick Analysis Workflow: Upload → Process → View Results")
+
+user = st.session_state.user
+db_manager = st.session_state.db_manager
+
+# Progress indicator
+if 'analysis_stage' not in st.session_state:
+    st.session_state.analysis_stage = 'upload'
+
+# Stage 1: Upload
+st.subheader("Step 1: Upload Your EEG File")
+uploaded_file = st.file_uploader("Choose an EDF file", type=['edf'], help="Upload a 64-channel EEG file in EDF format")
+
+if uploaded_file is not None and 'file_uploaded' not in st.session_state:
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.edf') as tmp_file:
+        tmp_file.write(uploaded_file.getvalue())
+        tmp_file_path = tmp_file.name
+    
+    try:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        status_text.text("⏳ Reading EEG file...")
+        progress_bar.progress(20)
+        
+        # Initialize processors
+        eeg_processor = EEGProcessor()
+        channel_selector = ChannelSelector(target_channels=20)
+        
+        # Read and preprocess (quietly)
+        data, channel_names, sampling_rate = eeg_processor.read_edf_file(tmp_file_path)
+        progress_bar.progress(40)
+        
+        status_text.text("⏳ Preprocessing signals...")
+        preprocessed_data = eeg_processor.preprocess_signals(data)
+        progress_bar.progress(60)
+        
+        status_text.text("⏳ Optimizing channel selection...")
+        selected_data, selected_indices, selected_names = channel_selector.select_optimal_channels(
+            preprocessed_data, channel_names, method='names'
+        )
+        progress_bar.progress(80)
+        
+        # Create session
+        session_id = db_manager.create_session(
+            user['id'],
+            uploaded_file.name,
+            len(channel_names),
+            len(selected_names)
+        )
+        
+        # Store in session state
+        st.session_state['current_session_id'] = session_id
+        st.session_state['selected_data'] = selected_data
+        st.session_state['selected_names'] = selected_names
+        st.session_state['sampling_rate'] = sampling_rate
+        st.session_state['file_uploaded'] = True
+        st.session_state.analysis_stage = 'analyze'
+        
+        # Encrypt and save data
+        security_manager = SecurityManager()
+        encrypted_data = security_manager.encrypt_data(selected_data)
+        data_hash = security_manager.hash_data(selected_data)
+        db_manager.save_eeg_data(session_id, encrypted_data, data_hash)
+        
+        db_manager.log_activity(user['id'], 'upload', f"Uploaded {uploaded_file.name}")
+        
+        progress_bar.progress(100)
+        status_text.text("")
+        st.success(f"✅ File processed successfully! ({len(channel_names)}→20 channels optimized)")
+        st.rerun()
+    
+    except Exception as e:
+        st.error(f"Error processing file: {str(e)}")
+        db_manager.log_activity(user['id'], 'error', f"Upload failed: {str(e)}")
+    
+    finally:
+        if os.path.exists(tmp_file_path):
+            os.remove(tmp_file_path)
+
+# Stage 2: Analysis
+if st.session_state.get('file_uploaded') and 'current_session_id' in st.session_state:
+    
+    st.markdown("---")
+    st.subheader("Step 2: Run Complete Analysis")
+    
+    selected_data = st.session_state['selected_data']
+    selected_names = st.session_state['selected_names']
+    sampling_rate = st.session_state['sampling_rate']
+    session_id = st.session_state['current_session_id']
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        run_quantum = st.checkbox("Include Quantum Models (QSVM)", value=True, help="Quantum models take longer but provide advanced analysis")
+    
+    with col2:
+        run_classical = st.checkbox("Include Classical Models (SVM, RF)", value=True, help="Fast classical machine learning models")
+    
+    # Validate at least one model is selected
+    if not run_quantum and not run_classical:
+        st.warning("⚠️ Please select at least one model type (Quantum or Classical) to run analysis.")
+    
+    can_analyze = run_quantum or run_classical
+    
+    if st.button("🚀 Start Complete Analysis", type="primary", use_container_width=True, disabled=not can_analyze):
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Step 1: Brain Metrics
+        status_text.text("🧠 Computing brain metrics...")
+        progress_bar.progress(15)
+        
+        analyzer = BrainMetricsAnalyzer(sampling_rate)
+        metrics = analyzer.get_comprehensive_report(selected_data, selected_names)
+        
+        db_manager.save_brain_metrics(
+            session_id, metrics['alpha_power'], metrics['beta_power'],
+            metrics['theta_power'], metrics['delta_power'],
+            metrics['total_power'], metrics
+        )
+        st.session_state['metrics'] = metrics
+        progress_bar.progress(30)
+        
+        # Step 2: Prepare ML data
+        status_text.text("🔧 Preparing ML features...")
+        classical_ml = ClassicalMLModels()
+        features = classical_ml.extract_features(selected_data)
+        labels = Helpers.create_dummy_labels(len(features))
+        X_train, X_test, y_train, y_test = Helpers.split_data(features, labels, test_size=0.3)
+        progress_bar.progress(40)
+        
+        predictions_dict = {}
+        current_progress = 40
+        
+        # Step 3: Quantum Models
+        if run_quantum:
+            status_text.text("⚛️ Training Quantum SVM...")
+            try:
+                qml_models = QuantumMLModels(n_qubits=4)
+                qsvm, train_acc, qsvm_metrics = qml_models.train_qsvm(X_train, y_train)
+                qsvm_pred, pred_time = qml_models.predict_qsvm(qsvm, X_train, X_test)
+                test_acc = np.mean(qsvm_pred == y_test)
+                
+                db_manager.save_prediction(
+                    session_id, 'quantum', 'QSVM', test_acc,
+                    f"Predicted {len(qsvm_pred)} samples", pred_time
+                )
+                
+                predictions_dict['QSVM'] = {
+                    'accuracy': test_acc,
+                    'processing_time': pred_time
+                }
+                current_progress = 60
+                progress_bar.progress(current_progress)
+                
+            except Exception as e:
+                st.warning(f"Quantum model skipped: {str(e)}")
+        
+        # Step 4: Classical Models
+        if run_classical:
+            # SVM
+            status_text.text("🔬 Training Classical SVM...")
+            current_progress += 10
+            progress_bar.progress(current_progress)
+            
+            try:
+                classical_ml = ClassicalMLModels()
+                svm, train_acc, svm_metrics = classical_ml.train_svm(X_train, y_train)
+                svm_pred, pred_time, pred_metrics = classical_ml.predict_svm(svm, X_test, y_test)
+                
+                db_manager.save_prediction(
+                    session_id, 'classical', 'SVM', pred_metrics['accuracy'],
+                    f"Predicted {len(svm_pred)} samples", pred_time
+                )
+                
+                predictions_dict['SVM'] = {
+                    'accuracy': pred_metrics['accuracy'],
+                    'processing_time': pred_time
+                }
+                current_progress += 15
+                progress_bar.progress(current_progress)
+                
+            except Exception as e:
+                st.warning(f"SVM skipped: {str(e)}")
+            
+            # Random Forest
+            status_text.text("🌲 Training Random Forest...")
+            try:
+                rf, train_acc, rf_metrics = classical_ml.train_random_forest(X_train, y_train, n_estimators=50)
+                rf_pred, pred_time, pred_metrics = classical_ml.predict_random_forest(rf, X_test, y_test)
+                
+                db_manager.save_prediction(
+                    session_id, 'classical', 'Random Forest', pred_metrics['accuracy'],
+                    f"Predicted {len(rf_pred)} samples", pred_time
+                )
+                
+                predictions_dict['Random Forest'] = {
+                    'accuracy': pred_metrics['accuracy'],
+                    'processing_time': pred_time
+                }
+                current_progress += 15
+                progress_bar.progress(current_progress)
+                
+            except Exception as e:
+                st.warning(f"Random Forest skipped: {str(e)}")
+        
+        # Store predictions
+        st.session_state['predictions'] = predictions_dict
+        
+        # Update session
+        db_manager.update_session_status(session_id, 'completed')
+        db_manager.log_activity(user['id'], 'prediction', 'Completed analysis')
+        
+        progress_bar.progress(100)
+        status_text.text("")
+        
+        st.success("✅ Analysis Complete!")
+        st.balloons()
+        
+        # Show results summary
+        st.markdown("---")
+        st.subheader("📊 Quick Results Summary")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Brain State", metrics['brain_state'])
+        
+        with col2:
+            if predictions_dict:
+                avg_acc = np.mean([v['accuracy'] for v in predictions_dict.values()])
+                st.metric("Avg Model Accuracy", f"{avg_acc:.1%}")
+        
+        with col3:
+            st.metric("Models Tested", len(predictions_dict))
+        
+        # Navigation button
+        st.markdown("---")
+        st.info("📄 **Next Steps:** Go to the **Results** page to view detailed analysis and download your PDF report!")
+        
+        st.session_state.analysis_stage = 'complete'
+
+# Clear upload state button
+if st.session_state.get('file_uploaded'):
+    st.markdown("---")
+    if st.button("🔄 Upload New File"):
+        for key in ['file_uploaded', 'current_session_id', 'selected_data', 'selected_names', 'sampling_rate', 'metrics', 'predictions']:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.session_state.analysis_stage = 'upload'
+        st.rerun()

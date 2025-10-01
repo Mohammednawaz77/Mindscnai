@@ -1,0 +1,23 @@
+[project]
+name = "repl-nix-workspace"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "bcrypt>=5.0.0",
+    "cryptography>=46.0.2",
+    "fpdf>=1.7.2",
+    "matplotlib>=3.10.6",
+    "mne>=1.10.1",
+    "pennylane>=0.42.3",
+    "plotly>=6.3.0",
+    "pyedflib>=0.1.42",
+    "scikit-learn>=1.7.2",
+    "scipy>=1.16.2",
+    "streamlit-autorefresh>=1.0.1",
+    "streamlit>=1.50.0",
+    "tensorflow-quantum>=0.7.3",
+    "fastapi>=0.118.0",
+    "uvicorn>=0.37.0",
+    "websockets>=15.0.1",
+]

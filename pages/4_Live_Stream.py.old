@@ -1,0 +1,350 @@
+"""Live EEG Stream with Real-Time Brain State Analysis"""
+import streamlit as st
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
+import time
+from pathlib import Path
+
+# Check authentication
+if 'authenticated' not in st.session_state or not st.session_state.authenticated:
+    st.warning("⚠️ Please login from the main page")
+    st.stop()
+
+st.set_page_config(page_title="Live Stream", page_icon="📡", layout="wide")
+
+# Initialize streaming components
+if 'streaming_initialized' not in st.session_state:
+    import sys
+    sys.path.insert(0, '/home/runner/workspace')
+    
+    from streaming.ring_buffer import RingBuffer
+    from streaming.edf_replay import EDFReplayStreamer
+    from streaming.inference_engine import InferenceEngine
+    
+    # Create ring buffer (20 channels, 60 second window for calibration, 256 Hz)
+    st.session_state.ring_buffer = RingBuffer(n_channels=20, buffer_seconds=60.0, sampling_rate=256.0)
+    
+    # Create inference engine
+    st.session_state.inference_engine = InferenceEngine(
+        st.session_state.ring_buffer,
+        window_seconds=2.0,
+        hop_seconds=0.5
+    )
+    
+    # EDF replay streamer
+    edf_file = 'test_eeg_64ch.edf'
+    if Path(edf_file).exists():
+        st.session_state.streamer = EDFReplayStreamer(
+            edf_file_path=edf_file,
+            target_channels=20,
+            playback_speed=1.0
+        )
+    else:
+        st.session_state.streamer = None
+    
+    st.session_state.streaming_initialized = True
+    st.session_state.is_streaming = False
+
+st.title("📡 Live EEG Stream")
+st.markdown("### Real-Time Brain State Monitoring")
+
+# Control buttons
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    if st.button("▶️ Start Stream", disabled=st.session_state.is_streaming):
+        if st.session_state.streamer:
+            # Capture ring_buffer reference to avoid session_state access in background thread
+            ring_buffer_ref = st.session_state.ring_buffer
+            
+            # Define callback for streaming
+            def on_sample(sample, timestamp):
+                ring_buffer_ref.append(sample)
+            
+            # Start streaming
+            st.session_state.streamer.start_stream(callback=on_sample, loop=True)
+            st.session_state.inference_engine.start()
+            st.session_state.is_streaming = True
+            st.success("Stream started!")
+        else:
+            st.error("No EDF file available for streaming")
+
+with col2:
+    if st.button("⏸️ Stop Stream", disabled=not st.session_state.is_streaming):
+        if st.session_state.streamer:
+            st.session_state.streamer.stop_stream()
+            st.session_state.inference_engine.stop()
+            st.session_state.is_streaming = False
+            st.info("Stream stopped")
+
+with col3:
+    if st.button("🎯 Calibrate", disabled=not st.session_state.is_streaming):
+        buffer_stats = st.session_state.ring_buffer.get_stats()
+        seconds_available = buffer_stats['current_samples'] / buffer_stats['sampling_rate']
+        
+        if seconds_available >= 30:
+            success = st.session_state.inference_engine.calibrate()
+            if success:
+                st.success("✅ Calibration complete! Personalized baseline set.")
+            else:
+                st.error("❌ Calibration failed. Please try again.")
+        else:
+            st.warning(f"⏳ Need 30s of data. Currently have {seconds_available:.1f}s. Please wait {30-seconds_available:.1f}s more.")
+
+with col4:
+    if st.button("🔄 Reset"):
+        st.session_state.ring_buffer.clear()
+        st.info("Buffer cleared")
+
+# Display streaming status
+status_col1, status_col2, status_col3 = st.columns(3)
+
+buffer_stats = st.session_state.ring_buffer.get_stats()
+with status_col1:
+    status_text = "🟢 Streaming" if st.session_state.is_streaming else "🔴 Stopped"
+    st.metric("Status", status_text)
+
+with status_col2:
+    st.metric("Buffer Fill", f"{buffer_stats['fill_percentage']:.1f}%")
+
+with status_col3:
+    st.metric("Samples", f"{buffer_stats['total_received']:,}")
+
+st.markdown("---")
+
+# Real-time visualizations
+viz_tab1, viz_tab2, viz_tab3 = st.tabs(["🌊 Signal Waves", "🧠 Brain States", "📊 Trends"])
+
+with viz_tab1:
+    st.subheader("Continuous EEG Signals (20 Channels)")
+    
+    # Get latest data for visualization
+    signal_data = st.session_state.ring_buffer.get_latest(n_samples=1280)  # 5 seconds at 256 Hz
+    
+    if signal_data.shape[1] > 0:
+        # Create 4x5 grid of signal plots
+        n_channels = min(20, signal_data.shape[0])
+        n_cols = 4
+        n_rows = 5
+        
+        fig = make_subplots(
+            rows=n_rows, cols=n_cols,
+            subplot_titles=[f"Ch{i+1}" for i in range(n_channels)],
+            vertical_spacing=0.03,
+            horizontal_spacing=0.02
+        )
+        
+        for i in range(n_channels):
+            row = i // n_cols + 1
+            col = i % n_cols + 1
+            
+            # Time axis (last 5 seconds)
+            time_axis = np.linspace(-5, 0, signal_data.shape[1])
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=time_axis,
+                    y=signal_data[i, :],
+                    mode='lines',
+                    line=dict(color='#1f77b4', width=1.5),  # Blue color
+                    showlegend=False
+                ),
+                row=row, col=col
+            )
+            
+            # Update axes
+            fig.update_xaxes(showticklabels=False, row=row, col=col)
+            fig.update_yaxes(showticklabels=False, row=row, col=col)
+        
+        fig.update_layout(
+            height=800,
+            title_text="Live EEG Signals (5-second rolling window)",
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("⏳ Waiting for data... Start the stream to see live signals")
+
+with viz_tab2:
+    st.subheader("Real-Time Brain State Analysis")
+    
+    # Get latest inference results
+    results = st.session_state.inference_engine.get_latest_results()
+    
+    if results:
+        # Brain state gauges
+        gauge_col1, gauge_col2, gauge_col3 = st.columns(3)
+        
+        with gauge_col1:
+            cog_load = results['cognitive_load']
+            fig_gauge1 = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=cog_load.get('smoothed_score', cog_load['score']),
+                title={'text': "Cognitive Load"},
+                delta={'reference': 50},
+                gauge={
+                    'axis': {'range': [0, 100]},
+                    'bar': {'color': "#FF6B6B"},
+                    'steps': [
+                        {'range': [0, 30], 'color': "#E8F5E9"},
+                        {'range': [30, 60], 'color': "#FFF9C4"},
+                        {'range': [60, 100], 'color': "#FFCDD2"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 80
+                    }
+                }
+            ))
+            fig_gauge1.update_layout(height=300)
+            st.plotly_chart(fig_gauge1, use_container_width=True)
+            st.caption(f"Level: **{cog_load['level']}**")
+        
+        with gauge_col2:
+            focus = results['focus']
+            fig_gauge2 = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=focus.get('smoothed_score', focus['score']),
+                title={'text': "Focus & Attention"},
+                delta={'reference': 50},
+                gauge={
+                    'axis': {'range': [0, 100]},
+                    'bar': {'color': "#4CAF50"},
+                    'steps': [
+                        {'range': [0, 30], 'color': "#FFCDD2"},
+                        {'range': [30, 70], 'color': "#FFF9C4"},
+                        {'range': [70, 100], 'color': "#E8F5E9"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "green", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 70
+                    }
+                }
+            ))
+            fig_gauge2.update_layout(height=300)
+            st.plotly_chart(fig_gauge2, use_container_width=True)
+            st.caption(f"Level: **{focus['level']}**")
+        
+        with gauge_col3:
+            anxiety = results['anxiety']
+            fig_gauge3 = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=anxiety.get('smoothed_score', anxiety['score']),
+                title={'text': "Anxiety"},
+                delta={'reference': 50},
+                gauge={
+                    'axis': {'range': [0, 100]},
+                    'bar': {'color': "#FF9800"},
+                    'steps': [
+                        {'range': [0, 30], 'color': "#E8F5E9"},
+                        {'range': [30, 60], 'color': "#FFF9C4"},
+                        {'range': [60, 100], 'color': "#FFCDD2"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "orange", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 70
+                    }
+                }
+            ))
+            fig_gauge3.update_layout(height=300)
+            st.plotly_chart(fig_gauge3, use_container_width=True)
+            st.caption(f"Level: **{anxiety['level']}**")
+        
+        # Band powers
+        st.markdown("#### Frequency Band Powers")
+        band_powers = results['band_powers']
+        
+        band_col1, band_col2, band_col3, band_col4, band_col5 = st.columns(5)
+        bands = ['delta', 'theta', 'alpha', 'beta', 'gamma']
+        cols = [band_col1, band_col2, band_col3, band_col4, band_col5]
+        
+        for band, col in zip(bands, cols):
+            rel_power = band_powers.get(f'{band}_rel', 0)
+            col.metric(band.capitalize(), f"{rel_power:.1f}%")
+        
+        if results['calibrated']:
+            st.success("✅ System calibrated with baseline")
+        else:
+            st.info("ℹ️ Click 'Calibrate' button for personalized baseline (30s rest required)")
+    
+    else:
+        st.info("⏳ Waiting for inference results... Stream needs ~2 seconds of data")
+
+with viz_tab3:
+    st.subheader("10-Minute Trend Analysis")
+    
+    # Get historical data
+    history = st.session_state.inference_engine.get_history(minutes=10)
+    
+    if len(history['timestamps']) > 0:
+        # Create relative time axis (minutes ago)
+        current_time = time.time()
+        time_axis = [(t - current_time) / 60 for t in history['timestamps']]
+        
+        fig_trends = go.Figure()
+        
+        fig_trends.add_trace(go.Scatter(
+            x=time_axis,
+            y=history['cognitive_load'],
+            mode='lines',
+            name='Cognitive Load',
+            line=dict(color='#FF6B6B', width=2)
+        ))
+        
+        fig_trends.add_trace(go.Scatter(
+            x=time_axis,
+            y=history['focus'],
+            mode='lines',
+            name='Focus',
+            line=dict(color='#4CAF50', width=2)
+        ))
+        
+        fig_trends.add_trace(go.Scatter(
+            x=time_axis,
+            y=history['anxiety'],
+            mode='lines',
+            name='Anxiety',
+            line=dict(color='#FF9800', width=2)
+        ))
+        
+        fig_trends.update_layout(
+            title="Brain State Trends (Last 10 Minutes)",
+            xaxis_title="Time (minutes ago)",
+            yaxis_title="Score (0-100)",
+            height=400,
+            hovermode='x unified'
+        )
+        
+        st.plotly_chart(fig_trends, use_container_width=True)
+        
+        # Statistics
+        stat_col1, stat_col2, stat_col3 = st.columns(3)
+        
+        with stat_col1:
+            avg_load = np.mean(history['cognitive_load'])
+            st.metric("Avg Cognitive Load", f"{avg_load:.1f}")
+        
+        with stat_col2:
+            avg_focus = np.mean(history['focus'])
+            st.metric("Avg Focus", f"{avg_focus:.1f}")
+        
+        with stat_col3:
+            avg_anxiety = np.mean(history['anxiety'])
+            st.metric("Avg Anxiety", f"{avg_anxiety:.1f}")
+    
+    else:
+        st.info("⏳ Trend data will appear after a few inference cycles...")
+
+# Auto-refresh for live updates
+if st.session_state.is_streaming:
+    time.sleep(0.2)  # Update at ~5 Hz
+    st.rerun()
+
+# Footer
+st.markdown("---")
+st.caption(f"👤 Logged in as: {st.session_state.get('username', 'Unknown')} | Role: {st.session_state.get('role', 'Unknown')}")
